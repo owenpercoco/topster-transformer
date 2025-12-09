@@ -32,36 +32,6 @@ def preprocess_image(path: str, upscale: int = 4) -> Image.Image:
         im = im.resize((im.width * upscale, im.height * upscale), Image.BILINEAR)
     return im
 
-def save_edited_image(img: Image.Image, out_path: str = "edited_image.png") -> str:
-    """
-    Save a PIL Image to `out_path` (default: 'edited_image.png') and return the path.
-
-    - Converts image mode if necessary so PNG encoding succeeds.
-    - Creates parent directory if it doesn't exist.
-    - Raises exceptions on I/O errors so callers can handle/report them.
-    """
-    # Ensure parent directory exists
-    parent = os.path.dirname(out_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-
-    # Convert to a PNG-friendly mode if required
-    # Keep alpha if present, otherwise use RGB
-    try:
-        if img.mode not in ("RGB", "RGBA", "L"):
-            if "A" in img.getbands():
-                img_to_save = img.convert("RGBA")
-            else:
-                img_to_save = img.convert("RGB")
-        else:
-            img_to_save = img
-
-        img_to_save.save(out_path, format="PNG")
-    except Exception:
-        # re-raise so the caller can handle the failure, or swap to a fallback behavior
-        raise
-
-    return out_path
 
 
 def find_nonblack_block(img: Image.Image, black_threshold: int = 0.5, black_fraction: float = 0.95, starting_point: int = 0) -> Optional[tuple]:
@@ -131,82 +101,51 @@ def find_nonblack_block(img: Image.Image, black_threshold: int = 0.5, black_frac
     return (start_y, end_y)
 
 
-def crop_and_save_image(img: Image.Image, upper: int, lower: int, index: int, out_dir: str = "./croppedblocks/") -> str:
-    """Crop a PIL Image to the vertical bounds [upper:lower] and save as PNG.
-
-    Parameters
-    - img: PIL.Image.Image to crop
-    - upper: upper y-coordinate (inclusive)
-    - lower: lower y-coordinate (exclusive)
-    - index: integer used to name the output file: edited_image_{index}.png
-    - out_dir: directory to save the file (created if necessary)
-
-    Returns the path to the saved file.
-    """
-    # Normalize and clamp coordinates
-    width, height = img.size
-    cropped = img.crop((0, upper - 20, width, lower + 20))
-
-    # Build output path and delegate actual saving to save_edited_image()
-    out_path = os.path.join(out_dir, f"edited_image_{index}.png")
-
-    # Use the common save helper which handles mode conversion and directory creation
-    return save_edited_image(cropped, out_path=out_path)
-
-
-
-def read_image(image_or_path, reader=None, languages=("en",), gpu=False, paragraph=True) -> List[str]:
+def read_image(image: Image.Image, reader=None, languages=("en",), gpu=False, paragraph=True) -> List[str]:
     """Run EasyOCR and return a list of detected lines (strings).
 
     Accepts a PIL Image or a file path. If `reader` is None a temporary reader is created.
     """
-
-    input_arg = image_or_path
-    results = reader.readtext(input_arg, detail=1, paragraph=paragraph)
+    image = np.array(image)
+    results = reader.readtext(image, detail=1, paragraph=paragraph)
     lines = [r[1].strip() for r in results if r[1].strip()]
     return " ".join(lines).strip()
 
 
-def print_all_nonblack_blocks(image_or_path, black_threshold: int = 0, out_dir: str = './cropped/', save: bool = True) -> List[tuple]:
-    """Iterate through the image and print (and optionally save) every non-black vertical block.
+def print_all_nonblack_blocks(image: Image.Image, black_threshold: int = 0, black_fraction: float = 0.95) -> List[Image.Image]:
+    """Iterate through the image, crop each non-black vertical block and return them as PIL Images.
 
-    Returns a list of (start_y, end_y) tuples in the order they were found.
+    Returns:
+    - List[Image.Image]: list of cropped block images in the order found.
     """
-    if isinstance(image_or_path, Image.Image):
-        img = image_or_path
-    else:
-        img = Image.open(image_or_path).convert('RGB')
 
-    blocks = []
+    crops: List[Image.Image] = []
     start_search = 0
     idx = 1
-    h = img.size[1]
+    width, h = image.size
 
     while start_search < h:
-        res = find_nonblack_block(img, black_threshold=black_threshold, starting_point=start_search)
+        res = find_nonblack_block(image, black_threshold=black_threshold, black_fraction=black_fraction, starting_point=start_search)
         if res is None:
             break
         s, e = res
         print(f"Block {idx}: start={s}, end={e}")
-        blocks.append((s, e))
-        if save:
-            try:
-                path = crop_and_save_image(img, s, e, idx, out_dir=out_dir)
-                print(f"  Saved block as: {path}")
-            except Exception as exc:
-                print(f"  Failed to save block {idx}: {exc}")
 
-        # Advance start_search to the row after the end to avoid finding the same block again
+        # Crop in-memory and collect
+        cropped = image.crop((0, s, width, e))
+        crops.append(cropped)
+
+
+        # Advance start_search to avoid finding the same block again
         next_start = e
         if next_start <= start_search:
-            # Defensive guard to prevent infinite loops
             next_start = start_search + 1
         start_search = next_start
         idx += 1
 
-    if not blocks:
+    if not crops:
         print("No non-black blocks found in image")
-    return blocks
+    return crops
 
 
 def normalize_and_split(arr) -> List[str]:
@@ -281,15 +220,13 @@ if __name__ == "__main__":
     reader = easyocr.Reader(['en'])
     sp = get_spotify_auth()
     #print('Running extract_albums_from_image on chart.png')
-    #img = preprocess_image('chart.png')
-    
-    #blocks = print_all_nonblack_blocks(img)
-    files = get_files_in_directory('./cropped')
+    img = preprocess_image('chart.png')
+    blocks = print_all_nonblack_blocks(img)
+
     index = 1
     pid = create_playlist("test playlist", sp)
-    for file in files:
-        print(f'./cropped/edited_image_{index}.png')
-        text = read_image(f'./cropped/edited_image_{index}.png', reader)
+    for block in blocks:
+        text = read_image(block, reader)
         print("read text as: ", text)
         try:
             run(sp, text, pid)
