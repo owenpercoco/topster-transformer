@@ -11,7 +11,7 @@ This file provides `extract_and_print_text_from_chart()` which returns the extra
 text and prints it to stdout.
 """
 
-import os
+import os, sys, time
 from typing import Optional, List
 import easyocr
 from PIL import Image, ImageOps, ImageFilter
@@ -20,7 +20,7 @@ import numpy as np
 from spotify import get_spotify_auth, run, create_playlist
 
 
-def preprocess_image(path: str, upscale: int = 4) -> Image.Image:
+def preprocess_image(path: str, upscale: int = 8) -> Image.Image:
     """Return a preprocessed PIL Image suitable for  OCR.
 
     Steps: grayscale, autocontrast, mild denoise, optional upscale.
@@ -101,15 +101,24 @@ def find_nonblack_block(img: Image.Image, black_threshold: int = 0.5, black_frac
     return (start_y, end_y)
 
 
-def read_image(image: Image.Image, reader=None, languages=("en",), gpu=False, paragraph=True) -> List[str]:
+def read_image(image: Image.Image, reader: easyocr.Reader, paragraph=True,) -> List[str]:
     """Run EasyOCR and return a list of detected lines (strings).
 
-    Accepts a PIL Image or a file path. If `reader` is None a temporary reader is created.
+    Accepts a PIL Image.
     """
+    image = ImageOps.invert(image)
+    image = image.filter(ImageFilter.EDGE_ENHANCE_MORE)
     image = np.array(image)
     results = reader.readtext(image, detail=1, paragraph=paragraph)
     lines = [r[1].strip() for r in results if r[1].strip()]
-    return " ".join(lines).strip()
+    text = " ".join(lines).strip()
+    for ch in ['.', '3', 'F', 'I', 'S', '1']:
+        sep = f" {ch} "
+        if sep in text:
+            text = text.replace(sep, ' - ', 1)
+            break
+
+    return text
 
 
 def print_all_nonblack_blocks(image: Image.Image, black_threshold: int = 0, black_fraction: float = 0.95) -> List[Image.Image]:
@@ -212,28 +221,54 @@ def get_files_in_directory(directory_path):
             files.append(entry) # Or full_path for absolute paths
     return files
 
+def print_progress_bar(iteration, total, length=50, fill='█', empty='-'):
+    """
+    Call in a loop to create terminal progress bar.
+
+    @params:
+        iteration   - Required  : current iteration (Int)
+        total       - Required  : total iterations (Int)
+        length      - Optional  : character length of bar (Int)
+        fill        - Optional  : bar fill character (Str)
+        empty       - Optional  : bar empty character (Str)
+    """
+    percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + empty * (length - filled_length)
+    
+    # Use carriage return (\r) to overwrite the current line
+    sys.stdout.write(f'\rProgress: |{bar}| {percent}% Complete')
+    sys.stdout.flush() # Ensure immediate display
+
+# --- Sample Usage ---
 
 
 if __name__ == "__main__":
     # Run the OCR on the local chart.webp by default
-    print('Creating EasyOCR reader (may take a moment)')
+    print('Creating EasyOCR reader (may take a moment)')   
     reader = easyocr.Reader(['en'])
     sp = get_spotify_auth()
     #print('Running extract_albums_from_image on chart.png')
     img = preprocess_image('chart.png')
     blocks = print_all_nonblack_blocks(img)
 
-    index = 1
-    pid = create_playlist("test playlist", sp)
-    for block in blocks:
+    pid = create_playlist("test playlist new finding algo", sp)
+    failures = []
+    print_progress_bar(0, len(blocks), length=40)
+    for i, block in enumerate(blocks):
         text = read_image(block, reader)
-        print("read text as: ", text)
         try:
-            run(sp, text, pid)
-        except:
+            if text:
+                print(" text read as: ", text)
+                run(sp, text, pid)
+        except Exception as Error:
             print("guess it didnt work try the next album")
-        index = index+1
+            failures.append(text)
+        
+        time.sleep(0.05) 
+        print_progress_bar(i + 1, len(blocks), length=40)
     
-    #run(sp, text[0], text[-1])
+    print("failed to find ", len(failures), " albums")
+    print(failures)
     print('--- End ---')
 
